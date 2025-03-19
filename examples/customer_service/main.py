@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 import asyncio
 import random
 import uuid
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -18,9 +19,17 @@ from agents import (
     TResponseInputItem,
     function_tool,
     handoff,
+    set_default_openai_api,
     trace,
 )
-from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+from agents.exceptions import InputGuardrailTripwireTriggered
+from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
+from agents.guardrail import GuardrailFunctionOutput, input_guardrail
+from agents.tracing import set_trace_processors
+from agents.tracing.processor_interface import TracingExporter
+from agents.tracing.processors import BatchTraceProcessor
+from agents.tracing.spans import Span
+from agents.tracing.traces import Trace
 
 ### CONTEXT
 
@@ -83,46 +92,88 @@ async def on_seat_booking_handoff(context: RunContextWrapper[AirlineAgentContext
     context.context.flight_number = flight_number
 
 
+### GUARDRAILS
+
+
+class ConversationTermination(BaseModel):
+    is_terminating_conversation: bool
+
+
+conversation_termination_agent = Agent(
+    name="ConversationTerminationAgent",
+    model="o3-mini",
+    instructions="""
+    Check if the user intends to end or quit the conversation.
+    This includes:
+    1. Explicit commands such as "quit", "exit", "stop", or "end".
+    2. Phrases indicating completion, such as "I'm done", "that's all", "no more questions", or "thank you, that's it".
+    3. Polite sign-offs or farewells like "goodbye", "see you", or "talk later", especially when accompanied by no further queries.""",
+    output_type=ConversationTermination,
+)
+
+
+@input_guardrail
+async def conversation_termination_guardrail(
+    context: RunContextWrapper[AirlineAgentContext],
+    agent: Agent,
+    input: str | list[TResponseInputItem],
+) -> GuardrailFunctionOutput:
+    result = await Runner.run(conversation_termination_agent, input, context=context.context)
+    final_output = result.final_output_as(ConversationTermination)
+
+    return GuardrailFunctionOutput(
+        output_info=final_output,
+        tripwire_triggered=final_output.is_terminating_conversation,
+    )
+
+
 ### AGENTS
 
 faq_agent = Agent[AirlineAgentContext](
     name="FAQ Agent",
+    model="o3-mini",
     handoff_description="A helpful agent that can answer questions about the airline.",
-    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+    instructions=prompt_with_handoff_instructions("""
     You are an FAQ agent. If you are speaking to a customer, you probably were transferred to from the triage agent.
     Use the following routine to support the customer.
     # Routine
     1. Identify the last question asked by the customer.
     2. Use the faq lookup tool to answer the question. Do not rely on your own knowledge.
-    3. If you cannot answer the question, transfer back to the triage agent.""",
+    3. If you cannot answer the question, transfer back to the triage agent.
+    4. Respond concisely and in a natural, conversational tone suitable for text-to-speech conversion."""),
     tools=[faq_lookup_tool],
+    input_guardrails=[conversation_termination_guardrail],
 )
 
 seat_booking_agent = Agent[AirlineAgentContext](
     name="Seat Booking Agent",
+    model="o3-mini",
     handoff_description="A helpful agent that can update a seat on a flight.",
-    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+    instructions=prompt_with_handoff_instructions("""
     You are a seat booking agent. If you are speaking to a customer, you probably were transferred to from the triage agent.
     Use the following routine to support the customer.
     # Routine
     1. Ask for their confirmation number.
     2. Ask the customer what their desired seat number is.
     3. Use the update seat tool to update the seat on the flight.
-    If the customer asks a question that is not related to the routine, transfer back to the triage agent. """,
+    If the customer asks a question that is not related to the routine, transfer back to the triage agent. """),
     tools=[update_seat],
+    input_guardrails=[conversation_termination_guardrail],
 )
+
 
 triage_agent = Agent[AirlineAgentContext](
     name="Triage Agent",
+    model="o3-mini",
     handoff_description="A triage agent that can delegate a customer's request to the appropriate agent.",
-    instructions=(
-        f"{RECOMMENDED_PROMPT_PREFIX} "
+    instructions=prompt_with_handoff_instructions(
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
     handoffs=[
         faq_agent,
         handoff(agent=seat_booking_agent, on_handoff=on_seat_booking_handoff),
     ],
+    input_guardrails=[conversation_termination_guardrail],
 )
 
 faq_agent.handoffs.append(triage_agent)
@@ -142,28 +193,51 @@ async def main():
     conversation_id = uuid.uuid4().hex[:16]
 
     while True:
-        user_input = input("Enter your message: ")
-        with trace("Customer service", group_id=conversation_id):
-            input_items.append({"content": user_input, "role": "user"})
-            result = await Runner.run(current_agent, input_items, context=context)
+        try:
+            user_input = input("Enter your message: ")
+            with trace("Customer service", group_id=conversation_id):
+                input_items.append({"content": user_input, "role": "user"})
+                result = await Runner.run(current_agent, input_items, context=context)
 
-            for new_item in result.new_items:
-                agent_name = new_item.agent.name
-                if isinstance(new_item, MessageOutputItem):
-                    print(f"{agent_name}: {ItemHelpers.text_message_output(new_item)}")
-                elif isinstance(new_item, HandoffOutputItem):
+                for new_item in result.new_items:
+                    agent_name = new_item.agent.name
+                    if isinstance(new_item, MessageOutputItem):
+                        print(f"{agent_name}: {ItemHelpers.text_message_output(new_item)}")
+                    elif isinstance(new_item, HandoffOutputItem):
+                        print(
+                            f"Handed off from {new_item.source_agent.name} to {new_item.target_agent.name}"
+                        )
+                    elif isinstance(new_item, ToolCallItem):
+                        print(f"{agent_name}: Calling a tool")
+                    elif isinstance(new_item, ToolCallOutputItem):
+                        print(f"{agent_name}: Tool call output: {new_item.output}")
+                    else:
+                        print(f"{agent_name}: Skipping item: {new_item.__class__.__name__}")
+                input_items = result.to_input_list()
+                current_agent = result.last_agent
+        except InputGuardrailTripwireTriggered:
+            exit(0)
+
+
+### FiledBasedSpanExporter
+
+
+class FiledBasedSpanExporter(TracingExporter):
+    """Prints the traces and spans to the console."""
+
+    def export(self, items: list[Trace | Span[Any]]) -> None:
+        with open("trace.txt", "w") as file:
+            for item in items:
+                if isinstance(item, Trace):
                     print(
-                        f"Handed off from {new_item.source_agent.name} to {new_item.target_agent.name}"
+                        f"[Exporter] Export trace_id={item.trace_id}, name={item.name}, ", file=file
                     )
-                elif isinstance(new_item, ToolCallItem):
-                    print(f"{agent_name}: Calling a tool")
-                elif isinstance(new_item, ToolCallOutputItem):
-                    print(f"{agent_name}: Tool call output: {new_item.output}")
                 else:
-                    print(f"{agent_name}: Skipping item: {new_item.__class__.__name__}")
-            input_items = result.to_input_list()
-            current_agent = result.last_agent
+                    print(f"[Exporter] Export span: {item.export()}", file=file)
 
 
 if __name__ == "__main__":
+    set_default_openai_api("chat_completions")
+    set_trace_processors([BatchTraceProcessor(FiledBasedSpanExporter())])
+
     asyncio.run(main())
