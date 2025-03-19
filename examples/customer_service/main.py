@@ -3,7 +3,9 @@ from __future__ import annotations as _annotations
 import asyncio
 import random
 import uuid
+from pathlib import Path
 
+from dotenv import get_key
 from pydantic import BaseModel
 
 from agents import (
@@ -18,6 +20,7 @@ from agents import (
     TResponseInputItem,
     function_tool,
     handoff,
+    set_default_openai_key,
     trace,
 )
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
@@ -166,4 +169,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    set_default_openai_key(get_key(str(Path.home() / ".env"), "OPENAI_API_KEY"))
     asyncio.run(main())
