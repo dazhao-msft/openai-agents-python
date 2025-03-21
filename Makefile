@@ -3,39 +3,38 @@ sync:
 	uv sync --all-extras --all-packages --group dev
 
 .PHONY: format
-format: 
+format:
 	uv run ruff format
 	uv run ruff check --fix
 
 .PHONY: lint
-lint: 
+lint:
 	uv run ruff check
 
 .PHONY: mypy
-mypy: 
+mypy:
 	uv run mypy .
 
 .PHONY: tests
-tests: 
-	uv run pytest 
+tests:
+	uv run pytest
 
 .PHONY: coverage
 coverage:
-	
 	uv run coverage run -m pytest
 	uv run coverage xml -o coverage.xml
 	uv run coverage report -m --fail-under=95
 
 .PHONY: snapshots-fix
-snapshots-fix: 
-	uv run pytest --inline-snapshot=fix 
+snapshots-fix:
+	uv run pytest --inline-snapshot=fix
 
-.PHONY: snapshots-create 
-snapshots-create: 
-	uv run pytest --inline-snapshot=create 
+.PHONY: snapshots-create
+snapshots-create:
+	uv run pytest --inline-snapshot=create
 
 .PHONY: old_version_tests
-old_version_tests: 
+old_version_tests:
 	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest
 	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m mypy .
 
@@ -51,5 +50,11 @@ serve-docs:
 deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
-	
-	
+.PHONY: lint-format
+lint-format:
+	uv run ruff check --fix
+	uv run ruff format
+
+.PHONY: example
+example:
+	uv run examples/customer_service/main.py

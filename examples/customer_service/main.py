@@ -3,7 +3,10 @@ from __future__ import annotations as _annotations
 import asyncio
 import random
 import uuid
+from pathlib import Path
+from typing import Any
 
+from dotenv import get_key
 from pydantic import BaseModel
 
 from agents import (
@@ -18,9 +21,15 @@ from agents import (
     TResponseInputItem,
     function_tool,
     handoff,
+    set_default_openai_key,
     trace,
 )
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+from agents.tracing import set_trace_processors, set_tracing_disabled
+from agents.tracing.processor_interface import TracingExporter
+from agents.tracing.processors import BatchTraceProcessor
+from agents.tracing.spans import Span
+from agents.tracing.traces import Trace
 
 ### CONTEXT
 
@@ -165,5 +174,27 @@ async def main():
             current_agent = result.last_agent
 
 
+### FiledBasedSpanExporter
+
+
+class FiledBasedSpanExporter(TracingExporter):
+    """Prints the traces and spans to the console."""
+
+    def export(self, items: list[Trace | Span[Any]]) -> None:
+        with open("trace.txt", "w") as file:
+            for item in items:
+                if isinstance(item, Trace):
+                    print(
+                        f"[Exporter] Export trace_id={item.trace_id}, name={item.name}, ", file=file
+                    )
+                else:
+                    print(f"[Exporter] Export span: {item.export()}", file=file)
+
+
 if __name__ == "__main__":
+    openai_api_key = get_key(str(Path.home() / ".env"), "OPENAI_API_KEY")
+    set_default_openai_key(key=openai_api_key, use_for_tracing=False)
+    set_trace_processors([BatchTraceProcessor(FiledBasedSpanExporter())])
+    set_tracing_disabled(False)
+
     asyncio.run(main())
