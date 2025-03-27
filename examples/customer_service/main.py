@@ -113,7 +113,7 @@ conversation_termination_agent = Agent(
 
 @input_guardrail
 async def conversation_termination_guardrail(
-    context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+    context: RunContextWrapper[AirlineAgentContext], agent: Agent, input: str | list[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
     result = await Runner.run(conversation_termination_agent, input, context=context.context)
     final_output = result.final_output_as(ConversationTermination)
