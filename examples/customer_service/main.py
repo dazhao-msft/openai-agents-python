@@ -19,6 +19,7 @@ from agents import (
     TResponseInputItem,
     function_tool,
     handoff,
+    set_default_openai_api,
     trace,
 )
 from agents.exceptions import InputGuardrailTripwireTriggered
@@ -230,6 +231,7 @@ class FiledBasedSpanExporter(TracingExporter):
 
 
 if __name__ == "__main__":
+    set_default_openai_api("chat_completions")
     set_trace_processors([BatchTraceProcessor(FiledBasedSpanExporter())])
 
     asyncio.run(main())
